@@ -1,0 +1,228 @@
+from flask_sqlalchemy import SQLAlchemy
+from flask import Flask, request, jsonify, render_template
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+import time
+
+app = Flask(__name__)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://root:root@db/loanflow'
+db = SQLAlchemy(app)
+
+class Loan(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100))
+    amount = db.Column(db.Integer)
+    status = db.Column(db.String(50), default="Submitted")
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(100), unique=True)
+    password = db.Column(db.String(100))
+    role = db.Column(db.String(50))  # user/admin/manager
+    is_verified = db.Column(db.Boolean, default=False)
+
+@app.route('/')
+def home():
+    return render_template('index.html')
+
+
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.get_json(silent=True) or {}
+    if not data.get('username') or not data.get('password'):
+        return jsonify({"message": "Username and password are required"}), 400
+    if data.get('role') not in ['user', 'admin', 'manager']:
+        return jsonify({"message": "Select a valid role"}), 400
+
+    user = User(
+        username=data['username'],
+        password=data['password'],
+        role=data.get('role', 'user'),
+        is_verified=False
+    )
+    try:
+        db.session.add(user)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"message": "Username already exists"}), 409
+
+    return jsonify({"message": "Account created. Wait for admin verification before login."})
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json(silent=True) or {}
+    if not data.get('username') or not data.get('password'):
+        return jsonify({"message": "Username and password are required"}), 400
+    if data.get('role') not in ['user', 'admin', 'manager']:
+        return jsonify({"message": "Select a valid role"}), 400
+
+    user = User.query.filter_by(
+        username=data['username'],
+        password=data['password'],
+        role=data['role']
+    ).first()
+
+    if not user:
+        return jsonify({"message": "Invalid credentials"}), 401
+
+    if not user.is_verified:
+        return jsonify({"message": "Account is waiting for admin verification"}), 403
+
+    return jsonify({
+        "message": "Login success",
+        "username": user.username,
+        "role": user.role,
+        "is_verified": user.is_verified
+    })
+    
+
+@app.route('/apply', methods=['POST'])
+def apply():
+    data = request.get_json(silent=True) or {}
+    if not data.get('name') or not data.get('amount'):
+        return jsonify({"message": "Name and amount are required"}), 400
+
+    try:
+        amount = int(data['amount'])
+    except ValueError:
+        return jsonify({"message": "Amount must be a number"}), 400
+
+    loan = Loan(name=data['name'], amount=amount)
+    db.session.add(loan)
+    db.session.commit()
+    return jsonify({"message": "Loan Submitted"})
+
+@app.route('/loans', methods=['GET'])
+def get_loans():
+    loans = Loan.query.all()
+    return jsonify([
+        {
+            "id": l.id,
+            "name": l.name,
+            "amount": l.amount,
+            "status": l.status
+        }
+        for l in loans
+    ])
+
+
+@app.route('/users', methods=['GET'])
+def get_users():
+    role = request.args.get('role')
+    if role != 'admin':
+        return jsonify({"message": "Unauthorized"}), 403
+
+    users = User.query.order_by(User.is_verified.asc(), User.id.desc()).all()
+    return jsonify([
+        {
+            "id": user.id,
+            "username": user.username,
+            "role": user.role,
+            "is_verified": user.is_verified
+        }
+        for user in users
+    ])
+
+
+@app.route('/users/<int:id>/verify', methods=['POST'])
+def verify_user(id):
+    data = request.get_json(silent=True) or {}
+    if data.get("role") != "admin":
+        return jsonify({"message": "Unauthorized"}), 403
+
+    user = db.session.get(User, id)
+    if user is None:
+        return jsonify({"message": "User not found"}), 404
+
+    user.is_verified = True
+    db.session.commit()
+    return jsonify({"message": "User verified"})
+
+
+@app.route('/verify/<int:id>', methods=['POST'])
+def verify(id):
+    data = request.get_json(silent=True) or {}
+    role = data.get("role")
+
+    if role != "admin":
+        return jsonify({"message": "Unauthorized"}), 403
+
+    loan = db.session.get(Loan, id)
+    if loan is None:
+        return jsonify({"message": "Loan not found"}), 404
+
+    loan.status = "Verified"
+    db.session.commit()
+    return jsonify({"message": "Verified"})
+
+@app.route('/approve/<int:id>', methods=['POST'])
+def approve(id):
+    data = request.get_json(silent=True) or {}
+    role = data.get("role")
+
+    if role != "manager":
+        return jsonify({"message": "Unauthorized"}), 403
+
+    loan = db.session.get(Loan, id)
+    if loan is None:
+        return jsonify({"message": "Loan not found"}), 404
+
+    loan.status = "Approved"
+    db.session.commit()
+    return jsonify({"message": "Approved"})
+
+
+@app.route('/reject/<int:id>', methods=['POST'])
+def reject(id):
+    data = request.get_json(silent=True) or {}
+    role = data.get("role")
+
+    if role != "manager":
+        return jsonify({"message": "Unauthorized"}), 403
+
+    loan = db.session.get(Loan, id)
+    if loan is None:
+        return jsonify({"message": "Loan not found"}), 404
+
+    loan.status = "Rejected"
+    db.session.commit()
+    return jsonify({"message": "Rejected"})
+
+
+def init_db():
+    for attempt in range(10):
+        try:
+            with app.app_context():
+                db.create_all()
+                ensure_user_verified_column()
+                seed_admin()
+            return
+        except Exception:
+            if attempt == 9:
+                raise
+            time.sleep(2)
+
+
+def ensure_user_verified_column():
+    columns = db.session.execute(text("SHOW COLUMNS FROM `user` LIKE 'is_verified'")).fetchall()
+    if not columns:
+        db.session.execute(text("ALTER TABLE `user` ADD COLUMN is_verified BOOLEAN DEFAULT FALSE"))
+        db.session.commit()
+
+
+def seed_admin():
+    admin = User.query.filter_by(username='admin').first()
+    if admin is None:
+        admin = User(username='admin', password='admin123', role='admin', is_verified=True)
+        db.session.add(admin)
+    else:
+        admin.password = 'admin123'
+        admin.role = 'admin'
+        admin.is_verified = True
+    db.session.commit()
+
+if __name__ == '__main__':
+    init_db()
+    app.run(host='0.0.0.0')
