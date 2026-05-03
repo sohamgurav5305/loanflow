@@ -6,7 +6,7 @@ import time
 
 app = Flask(__name__)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://root:root@db/loanflow'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///loanflow.db'
 db = SQLAlchemy(app)
 
 class Loan(db.Model):
