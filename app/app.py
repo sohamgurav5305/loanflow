@@ -192,25 +192,14 @@ def reject(id):
 
 
 def init_db():
-    for attempt in range(10):
-        try:
-            with app.app_context():
-                db.create_all()
-                ensure_user_verified_column()
-                seed_admin()
-            return
-        except Exception:
-            if attempt == 9:
-                raise
-            time.sleep(2)
+    with app.app_context():
+        db.create_all()
+        seed_admin()
 
 
 def ensure_user_verified_column():
-    columns = db.session.execute(text("SHOW COLUMNS FROM `user` LIKE 'is_verified'")).fetchall()
-    if not columns:
-        db.session.execute(text("ALTER TABLE `user` ADD COLUMN is_verified BOOLEAN DEFAULT FALSE"))
-        db.session.commit()
-
+    # Skip for SQLite (already handled by SQLAlchemy)
+    pass
 
 def seed_admin():
     admin = User.query.filter_by(username='admin').first()
