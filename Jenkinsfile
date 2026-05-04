@@ -19,7 +19,7 @@ pipeline {
             steps {
                 sshagent(['loanflow-ssh']) {
                     sh '''
-                    ssh -o StrictHostKeyChecking=no ec2-user@<LOANFLOW_IP> "
+                    ssh -o StrictHostKeyChecking=no ec2-user@13.201.96.182 "
                         docker stop loanflow || true &&
                         docker rm loanflow || true &&
                         docker run -d -p 5000:5000 --name loanflow loanflow-app
