@@ -1,58 +1,55 @@
-from flask_sqlalchemy import SQLAlchemy
 from flask import Flask, request, jsonify, render_template
+from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.exc import IntegrityError
 from prometheus_client import start_http_server, Counter
-from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 
-# ------------------ CONFIG ------------------
+# ------------------- DATABASE CONFIG -------------------
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///loanflow.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
 db = SQLAlchemy(app)
 
-# ------------------ METRICS ------------------
+# ------------------- PROMETHEUS -------------------
 REQUEST_COUNT = Counter('request_count', 'Total Requests')
 
-# ------------------ MODELS ------------------
+# ------------------- MODELS -------------------
 class Loan(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100))
     amount = db.Column(db.Integer)
     status = db.Column(db.String(50), default="Submitted")
 
-
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(100), unique=True, index=True)
-    password = db.Column(db.String(200))
+    username = db.Column(db.String(100), unique=True)
+    password = db.Column(db.String(100))
     role = db.Column(db.String(50))  # user/admin/manager
     is_verified = db.Column(db.Boolean, default=False)
 
-
-# ------------------ ROUTES ------------------
+# ------------------- ROUTES -------------------
 
 @app.route('/')
 def home():
     REQUEST_COUNT.inc()
-    return render_template('index.html')
+    return render_template('index.html')   # UI works
 
+# ------------------- AUTH -------------------
 
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json(silent=True) or {}
 
     if not data.get('username') or not data.get('password'):
-        return jsonify({"message": "Username and password are required"}), 400
+        return jsonify({"message": "Username and password required"}), 400
 
     if data.get('role') not in ['user', 'admin', 'manager']:
-        return jsonify({"message": "Select a valid role"}), 400
+        return jsonify({"message": "Invalid role"}), 400
 
     user = User(
         username=data['username'],
-        password=generate_password_hash(data['password']),
-        role=data.get('role', 'user'),
+        password=data['password'],
+        role=data['role'],
         is_verified=False
     )
 
@@ -63,72 +60,63 @@ def register():
         db.session.rollback()
         return jsonify({"message": "Username already exists"}), 409
 
-    return jsonify({"message": "Account created. Wait for admin verification before login."})
-
+    return jsonify({"message": "Registered. Wait for admin verification."})
 
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json(silent=True) or {}
 
-    if not data.get('username') or not data.get('password'):
-        return jsonify({"message": "Username and password are required"}), 400
-
-    if data.get('role') not in ['user', 'admin', 'manager']:
-        return jsonify({"message": "Select a valid role"}), 400
-
     user = User.query.filter_by(
-        username=data['username'],
-        role=data['role']
+        username=data.get('username'),
+        password=data.get('password'),
+        role=data.get('role')
     ).first()
 
-    if not user or not check_password_hash(user.password, data['password']):
+    if not user:
         return jsonify({"message": "Invalid credentials"}), 401
 
     if not user.is_verified:
-        return jsonify({"message": "Account is waiting for admin verification"}), 403
+        return jsonify({"message": "Not verified"}), 403
 
     return jsonify({
         "message": "Login success",
         "username": user.username,
-        "role": user.role,
-        "is_verified": user.is_verified
+        "role": user.role
     })
 
+# ------------------- LOANS -------------------
 
 @app.route('/apply', methods=['POST'])
 def apply():
     data = request.get_json(silent=True) or {}
 
     if not data.get('name') or not data.get('amount'):
-        return jsonify({"message": "Name and amount are required"}), 400
+        return jsonify({"message": "Name & amount required"}), 400
 
-    try:
-        amount = int(data['amount'])
-        if amount <= 0:
-            return jsonify({"message": "Amount must be positive"}), 400
-    except ValueError:
-        return jsonify({"message": "Amount must be a number"}), 400
+    loan = Loan(
+        name=data['name'],
+        amount=int(data['amount'])
+    )
 
-    loan = Loan(name=data['name'], amount=amount)
     db.session.add(loan)
     db.session.commit()
 
-    return jsonify({"message": "Loan Submitted"})
-
+    return jsonify({"message": "Loan submitted"})
 
 @app.route('/loans', methods=['GET'])
 def get_loans():
     loans = Loan.query.all()
+
     return jsonify([
         {
             "id": l.id,
             "name": l.name,
             "amount": l.amount,
             "status": l.status
-        }
-        for l in loans
+        } for l in loans
     ])
 
+# ------------------- ADMIN -------------------
 
 @app.route('/users', methods=['GET'])
 def get_users():
@@ -137,18 +125,16 @@ def get_users():
     if role != 'admin':
         return jsonify({"message": "Unauthorized"}), 403
 
-    users = User.query.order_by(User.is_verified.asc(), User.id.desc()).all()
+    users = User.query.all()
 
     return jsonify([
         {
-            "id": user.id,
-            "username": user.username,
-            "role": user.role,
-            "is_verified": user.is_verified
-        }
-        for user in users
+            "id": u.id,
+            "username": u.username,
+            "role": u.role,
+            "is_verified": u.is_verified
+        } for u in users
     ])
-
 
 @app.route('/users/<int:id>/verify', methods=['POST'])
 def verify_user(id):
@@ -159,7 +145,7 @@ def verify_user(id):
 
     user = db.session.get(User, id)
 
-    if user is None:
+    if not user:
         return jsonify({"message": "User not found"}), 404
 
     user.is_verified = True
@@ -167,9 +153,10 @@ def verify_user(id):
 
     return jsonify({"message": "User verified"})
 
+# ------------------- LOAN ACTIONS -------------------
 
 @app.route('/verify/<int:id>', methods=['POST'])
-def verify_loan(id):
+def verify(id):
     data = request.get_json(silent=True) or {}
 
     if data.get("role") != "admin":
@@ -177,14 +164,13 @@ def verify_loan(id):
 
     loan = db.session.get(Loan, id)
 
-    if loan is None:
+    if not loan:
         return jsonify({"message": "Loan not found"}), 404
 
     loan.status = "Verified"
     db.session.commit()
 
     return jsonify({"message": "Verified"})
-
 
 @app.route('/approve/<int:id>', methods=['POST'])
 def approve(id):
@@ -195,14 +181,13 @@ def approve(id):
 
     loan = db.session.get(Loan, id)
 
-    if loan is None:
+    if not loan:
         return jsonify({"message": "Loan not found"}), 404
 
     loan.status = "Approved"
     db.session.commit()
 
     return jsonify({"message": "Approved"})
-
 
 @app.route('/reject/<int:id>', methods=['POST'])
 def reject(id):
@@ -213,7 +198,7 @@ def reject(id):
 
     loan = db.session.get(Loan, id)
 
-    if loan is None:
+    if not loan:
         return jsonify({"message": "Loan not found"}), 404
 
     loan.status = "Rejected"
@@ -221,37 +206,27 @@ def reject(id):
 
     return jsonify({"message": "Rejected"})
 
-
-# ------------------ DB INIT ------------------
-
-def seed_admin():
-    admin = User.query.filter_by(username='admin').first()
-
-    if admin is None:
-        admin = User(
-            username='admin',
-            password=generate_password_hash('admin123'),
-            role='admin',
-            is_verified=True
-        )
-        db.session.add(admin)
-    else:
-        admin.password = generate_password_hash('admin123')
-        admin.role = 'admin'
-        admin.is_verified = True
-
-    db.session.commit()
-
+# ------------------- INIT -------------------
 
 def init_db():
     with app.app_context():
         db.create_all()
-        seed_admin()
 
+        admin = User.query.filter_by(username='admin').first()
+        if not admin:
+            admin = User(
+                username='admin',
+                password='admin123',
+                role='admin',
+                is_verified=True
+            )
+            db.session.add(admin)
 
-# ------------------ RUN ------------------
+        db.session.commit()
 
-if __name__ == '__main__':
-    start_http_server(8000)
+# ------------------- RUN -------------------
+
+if __name__ == "__main__":
     init_db()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    start_http_server(8000)   # Prometheus metrics
+    app.run(host='0.0.0.0', port=5000)
