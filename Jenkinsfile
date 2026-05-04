@@ -15,13 +15,17 @@ pipeline {
             }
         }
 
-        stage('Run Container') {
+        stage('Deploy to LoanFlow Server') {
             steps {
-                sh '''
-                docker stop loanflow || true
-                docker rm loanflow || true
-                docker run -d -p 5000:5000 --name loanflow loanflow-app
-                '''
+                sshagent(['loanflow-ssh']) {
+                    sh '''
+                    ssh -o StrictHostKeyChecking=no ec2-user@<LOANFLOW_IP> "
+                        docker stop loanflow || true &&
+                        docker rm loanflow || true &&
+                        docker run -d -p 5000:5000 --name loanflow loanflow-app
+                    "
+                    '''
+                }
             }
         }
     }
