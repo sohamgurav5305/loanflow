@@ -5,7 +5,7 @@ pipeline {
 
         stage('Clone Repo') {
             steps {
-                git 'https://github.com/sohamgaurav5305/loanflow.git'
+                git 'https://github.com/sohamgurav5305/loanflow.git'
             }
         }
 
