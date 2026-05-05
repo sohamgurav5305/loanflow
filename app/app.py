@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, render_template
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from prometheus_client import start_http_server, Counter
 
@@ -17,6 +18,7 @@ REQUEST_COUNT = Counter('request_count', 'Total Requests')
 class Loan(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100))
+    applicant_username = db.Column(db.String(100))
     amount = db.Column(db.Integer)
     status = db.Column(db.String(50), default="Submitted")
 
@@ -90,11 +92,15 @@ def login():
 def apply():
     data = request.get_json(silent=True) or {}
 
-    if not data.get('name') or not data.get('amount'):
-        return jsonify({"message": "Name & amount required"}), 400
+    if data.get("role") != "user":
+        return jsonify({"message": "Only users can apply for loans"}), 403
+
+    if not data.get('username') or not data.get('name') or not data.get('amount'):
+        return jsonify({"message": "Username, name, and amount required"}), 400
 
     loan = Loan(
         name=data['name'],
+        applicant_username=data['username'],
         amount=int(data['amount'])
     )
 
@@ -105,12 +111,23 @@ def apply():
 
 @app.route('/loans', methods=['GET'])
 def get_loans():
-    loans = Loan.query.all()
+    role = request.args.get('role')
+    username = request.args.get('username')
+
+    if role == 'user':
+        if not username:
+            return jsonify({"message": "Username required"}), 400
+        loans = Loan.query.filter_by(applicant_username=username).all()
+    elif role == 'manager':
+        loans = Loan.query.all()
+    else:
+        return jsonify({"message": "Unauthorized"}), 403
 
     return jsonify([
         {
             "id": l.id,
             "name": l.name,
+            "applicant_username": l.applicant_username,
             "amount": l.amount,
             "status": l.status
         } for l in loans
@@ -155,23 +172,6 @@ def verify_user(id):
 
 # ------------------- LOAN ACTIONS -------------------
 
-@app.route('/verify/<int:id>', methods=['POST'])
-def verify(id):
-    data = request.get_json(silent=True) or {}
-
-    if data.get("role") != "admin":
-        return jsonify({"message": "Unauthorized"}), 403
-
-    loan = db.session.get(Loan, id)
-
-    if not loan:
-        return jsonify({"message": "Loan not found"}), 404
-
-    loan.status = "Verified"
-    db.session.commit()
-
-    return jsonify({"message": "Verified"})
-
 @app.route('/approve/<int:id>', methods=['POST'])
 def approve(id):
     data = request.get_json(silent=True) or {}
@@ -211,6 +211,7 @@ def reject(id):
 def init_db():
     with app.app_context():
         db.create_all()
+        add_missing_columns()
 
         admin = User.query.filter_by(username='admin').first()
         if not admin:
@@ -222,6 +223,14 @@ def init_db():
             )
             db.session.add(admin)
 
+        db.session.commit()
+
+def add_missing_columns():
+    loan_columns = db.session.execute(text("PRAGMA table_info(loan)")).fetchall()
+    loan_column_names = {column[1] for column in loan_columns}
+
+    if "applicant_username" not in loan_column_names:
+        db.session.execute(text("ALTER TABLE loan ADD COLUMN applicant_username VARCHAR(100)"))
         db.session.commit()
 
 # ------------------- RUN -------------------
